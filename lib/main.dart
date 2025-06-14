@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
+import 'package:network_info_plus/network_info_plus.dart';
 
 import 'server.dart';
 import 'settings_service.dart';
@@ -12,7 +13,7 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized(); // Needed for SharedPreferences before runApp
-  await startServer(); // Start server with stored/default settings
+  // await startServer(); // Start server with stored/default settings
   runApp(const MyApp());
 }
 
@@ -30,17 +31,22 @@ class _MyAppState extends State<MyApp> {
   final TextEditingController _clientTargetPortController = TextEditingController(text: '8080');
 
   final SettingsService _settingsService = SettingsService();
-  late TextEditingController _serverListenIpController;
+  // late TextEditingController _serverListenIpController;
   late TextEditingController _serverListenPortController;
-  String _currentServerStatus = "Loading server settings...";
-  bool _useRandomPortForServer = false;
+  String _currentServerStatus = "Server not started...";
+  bool _useRandomPortForServer = true;
+
+  List<String> _availableIpAddresses = [];
+  String? _selectedServerIp;
+  bool _isLoadingIps = true;
+  final NetworkInfo _networkInfo = NetworkInfo();
 
   @override
   void initState() {
     super.initState();
-    _serverListenIpController = TextEditingController();
     _serverListenPortController = TextEditingController();
-    _loadServerSettingsAndStatus();
+    _fetchNetworkInterfaces();
+    _loadServerSettingsAndPortPreference();
 
     onFileReceivedRequest = (String filename, List<int> bytes) async {
       final BuildContext? dialogContext = navigatorKey.currentContext;
@@ -69,71 +75,172 @@ class _MyAppState extends State<MyApp> {
     };
   }
 
-  Future<void> _loadServerSettingsAndStatus() async {
-    final host = await _settingsService.getServerHost();
-    final port = await _settingsService.getServerPort();
+  Future<void> _fetchNetworkInterfaces({bool selectFirst = false, String? preselectIp}) async {
+    if (!mounted) return;
+    setState(() {
+      _isLoadingIps = true;
+    });
+    List<String> ips = [];
+    try {
+      // Always add 0.0.0.0 as an option to listen on all interfaces
+      ips.add('0.0.0.0');
+
+      // Get device's Wi-Fi IP (most common for local sharing)
+      final wifiIP = await _networkInfo.getWifiIP();
+      if (wifiIP != null && wifiIP.isNotEmpty && !ips.contains(wifiIP)) {
+        ips.add(wifiIP);
+      }
+      // Note: network_info_plus primarily gives the main Wi-Fi IP.
+      // For a more exhaustive list of all interface IPs (like on desktop),
+      // you might need to use platform channels or other plugins like `dart_ping`'s
+      // underlying mechanisms if they expose raw interface data, or specific desktop packages.
+      // For mobile, getWifiIP() and '0.0.0.0' are usually sufficient.
+
+    } catch (e) {
+      print("Failed to get IP addresses: $e");
+      if (mounted) _showSnackBar("Could not fetch network IP addresses.");
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _availableIpAddresses = ips.toSet().toList(); // Ensure unique IPs
+      if (preselectIp != null && _availableIpAddresses.contains(preselectIp)) {
+        _selectedServerIp = preselectIp;
+      } else if (selectFirst && _availableIpAddresses.isNotEmpty) {
+        _selectedServerIp = _availableIpAddresses.first;
+      } else if (_availableIpAddresses.isNotEmpty && !_availableIpAddresses.contains(_selectedServerIp)) {
+        // If current selection is no longer valid, try to select 0.0.0.0 or first available
+        _selectedServerIp = _availableIpAddresses.contains('0.0.0.0') ? '0.0.0.0' : _availableIpAddresses.first;
+      }
+      _isLoadingIps = false;
+      _updateServerStatusMessage(); // Update status after IPs are loaded
+    });
+  }
+
+  Future<void> _loadServerSettingsAndPortPreference() async {
+    final storedHost = await _settingsService.getServerHost();
+    final storedPort = await _settingsService.getServerPort();
+
+    await _fetchNetworkInterfaces(preselectIp: storedHost);
+
     if (mounted) {
       setState(() {
-        _serverListenIpController.text = host;
-        if (port == 0) {
-          _serverListenPortController.text = ""; // Clear it or set placeholder
-          _useRandomPortForServer = true; // Check the box
+        if (storedPort == 0) { // Indicates random or not set meaningfully
+          _serverListenPortController.clear();
+          _useRandomPortForServer = true;
         } else {
-          _serverListenPortController.text = port.toString();
+          _serverListenPortController.text = storedPort.toString();
           _useRandomPortForServer = false;
         }
-        _updateServerStatusMessage();
+
+        if (_selectedServerIp != null && _selectedServerIp!.isNotEmpty) {
+          _startServerWithCurrentSettings();
+        } else {
+          _currentServerStatus = "Select a server IP to start.";
+        }
+        // _updateServerStatusMessage(); // This is called within _startServerWithCurrentSettings or if it doesn't start
       });
     }
   }
 
 
   void _updateServerStatusMessage() {
-    // This needs to be more robust. The actual listening port is in _server.port after server starts.
-    // This is just a predictive message.
-    if (!isServerRunning) {
-      _currentServerStatus = "Server is stopped.";
-    } else {
-      _currentServerStatus = "Server listening on http://$serverAddress:$serverPort";
-    }
+    if (!mounted) return;
+
+    setState(() {
+      if (!isServerRunning()) { // Use the getter from server.dart
+        _currentServerStatus = _selectedServerIp == null || _selectedServerIp!.isEmpty
+            ? "Server not started. Select IP."
+            : "Server stopped. Ready to start on $_selectedServerIp.";
+      } else {
+        _currentServerStatus = "Server listening on http://${getServerAddress()}:${getServerPort()}";
+      }
+    });
   }
 
-  Future<void> _saveServerSettingsAndRestart() async {
-    final String newHost = _serverListenIpController.text.trim();
-    int? newPort;
-
-    if (_useRandomPortForServer) {
-      await _settingsService.setServerPortToRandom(); // Signal to use random on next generic start
-      newPort = 0; // Convention for "pick random"
-      print("ℹ️ Server will use a random port on next start.");
-    } else {
-      newPort = int.tryParse(_serverListenPortController.text.trim());
-      if (newPort == null || newPort <= 0 || newPort > 65535) {
-        _showSnackBar("Invalid port number. Must be between 1 and 65535.");
-        return;
-      }
-      await _settingsService.setServerPort(newPort);
-    }
-
-    if (newHost.isEmpty) {
-      _showSnackBar("Server IP/Host cannot be empty. Use '0.0.0.0' to listen on all interfaces.");
+  Future<void> _startServerWithCurrentSettings() async {
+    if (_selectedServerIp == null || _selectedServerIp!.isEmpty) {
+      _showSnackBar("Please select a valid Server IP address.");
+      _updateServerStatusMessage();
       return;
     }
+
+    int? portToPassToServer;
+    if (_useRandomPortForServer) {
+      portToPassToServer = 0; // Server will pick a random one
+    } else {
+      final String portText = _serverListenPortController.text.trim();
+      if (portText.isEmpty) {
+        _showSnackBar("Port cannot be empty when 'Use Random Port' is unchecked. Please enter a port or select random.");
+        _updateServerStatusMessage();
+        return;
+      }
+      final int? enteredPort = int.tryParse(portText);
+
+      if (enteredPort == null || enteredPort <= 0 || enteredPort > 65535) {
+        _showSnackBar("Invalid port. Please enter a number between 1 and 65535, or select random.");
+        _updateServerStatusMessage(); // Ensure status reflects that server didn't start
+        return;
+      }
+      portToPassToServer = enteredPort;
+    }
+
+    if (mounted) {
+      setState(() {
+        _currentServerStatus = "Starting server on $_selectedServerIp (port: ${portToPassToServer == 0 ? 'Random' : portToPassToServer})...";
+      });
+    }
+
+    await startServer(
+      host: _selectedServerIp!,
+      portOverride: portToPassToServer,
+    );
+    _updateServerStatusMessage(); // Update with actual listening address and port
+  }
+
+
+  Future<void> _saveServerSettingsAndRestart() async {
+    if (_selectedServerIp == null || _selectedServerIp!.isEmpty) {
+      _showSnackBar("Please select a Server IP address.");
+      return;
+    }
+
+    final String newHost = _selectedServerIp!;
+    int portToSaveAndPass; // Port to save in settings and pass to server
+
     await _settingsService.setServerHost(newHost);
 
+    if (_useRandomPortForServer) {
+      // Save 0 to settings to indicate random for next app launch
+      await _settingsService.setServerPort(0);
+      portToSaveAndPass = 0; // Tell server.dart to pick a new random one for this restart
+    } else {
+      final String portText = _serverListenPortController.text.trim();
+      if (portText.isEmpty) {
+        _showSnackBar("Port cannot be empty when 'Use Random Port' is unchecked. Please enter a port or select random to save.");
+        return;
+      }
+      final int? enteredPort = int.tryParse(portText);
+      if (enteredPort == null || enteredPort <= 0 || enteredPort > 65535) {
+        _showSnackBar("Invalid port. Please enter a number between 1 and 65535, or select random.");
+        return;
+      }
+      portToSaveAndPass = enteredPort;
+      await _settingsService.setServerPort(portToSaveAndPass); // Save the specific port
+    }
+
+    // ... (setState for restarting message)
     if (mounted) {
       setState(() {
         _currentServerStatus = "Restarting server with new settings...";
       });
     }
-    // Pass the explicit desire for random if the checkbox is checked for *this specific restart*
-    await restartServer(useRandomPort: _useRandomPortForServer);
-    // After server starts, _server.port will have the actual port
-    if (mounted) {
-      setState(() {
-        _loadServerSettingsAndStatus(); // Reload and update UI to show actual port
-      });
-    }
+
+    await restartServer(
+      hostOverride: newHost,
+      portOverride: portToSaveAndPass,
+    );
+    _updateServerStatusMessage(); // Update with actual details
     _showSnackBar("Server settings saved and server (re)started.");
   }
 
@@ -234,7 +341,6 @@ class _MyAppState extends State<MyApp> {
   void dispose() {
     _clientTargetIpController.dispose();
     _clientTargetPortController.dispose();
-    _serverListenIpController.dispose();
     _serverListenPortController.dispose();
     super.dispose();
   }
@@ -255,28 +361,93 @@ class _MyAppState extends State<MyApp> {
             children: <Widget>[
               // --- Server Settings Section ---
               const Text('Server Settings (This App as Receiver):', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _serverListenIpController,
-                decoration: const InputDecoration(
-                  labelText: 'Listen on IP/Host (e.g., 0.0.0.0)',
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: TextInputType.url,
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      decoration: const InputDecoration(
+                        labelText: 'Listen on IP Address',
+                        border: OutlineInputBorder(),
+                      ),
+                      value: _selectedServerIp,
+                      items: _availableIpAddresses.map((String ip) {
+                        return DropdownMenuItem<String>(
+                          value: ip,
+                          child: Text(ip),
+                        );
+                      }).toList(),
+                      onChanged: _isLoadingIps ? null : (String? newValue) {
+                        setState(() {
+                          _selectedServerIp = newValue;
+                          // If server is running and IP changes, it should be restarted
+                          if (isServerRunning()) {
+                            _saveServerSettingsAndRestart();
+                          } else {
+                            _updateServerStatusMessage();
+                          }
+                        });
+                      },
+                      hint: Text(_isLoadingIps ? 'Loading IPs...' : 'Select IP'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    icon: const Icon(Icons.refresh),
+                    tooltip: 'Refresh IP Addresses',
+                    onPressed: () => _fetchNetworkInterfaces(selectFirst: false, preselectIp: _selectedServerIp),
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: _serverListenPortController,
-                decoration: const InputDecoration(
-                  labelText: 'Listen on Port (e.g., 8080)',
+                decoration: InputDecoration(
+                  labelText: 'Listen on Port',
                   border: OutlineInputBorder(),
+                  hintText: _useRandomPortForServer ? "Random" : "1-65535",
                 ),
                 keyboardType: TextInputType.number,
+                enabled: !_useRandomPortForServer,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Checkbox(
+                    value: _useRandomPortForServer,
+                    onChanged: (bool? value) {
+                      setState(() {
+                        _useRandomPortForServer = value ?? false;
+                        if (_useRandomPortForServer) {
+                          _serverListenPortController.clear();
+                        } else {
+                          // When unchecking "Use Random Port"
+                          _settingsService.getServerPort().then((storedPort) {
+                            if (storedPort != 0) { // If there was a specific port saved
+                              _serverListenPortController.text = storedPort.toString();
+                            } else {
+                              _serverListenPortController.clear(); // Ensure it's clear for user input
+                            }
+                          });
+                        }
+                        // If server is running and port preference changes, it should be restarted
+                        if (isServerRunning()) {
+                          _saveServerSettingsAndRestart();
+                        } else {
+                          _updateServerStatusMessage();
+                        }
+                      });
+                    },
+                  ),
+                  const Text('Use Random Port (49152-65535)'),
+                ],
               ),
               const SizedBox(height: 12),
               ElevatedButton(
-                onPressed: _saveServerSettingsAndRestart,
-                child: const Text('Save Settings & Restart Server'),
+                onPressed: _selectedServerIp == null || _selectedServerIp!.isEmpty
+                    ? null // Disable button if no IP selected
+                    : (isServerRunning() ? _saveServerSettingsAndRestart : _startServerWithCurrentSettings),
+                child: Text(isServerRunning() ? 'Save & Restart Server' : 'Start Server'),
               ),
               const SizedBox(height: 8),
               Text(_currentServerStatus, textAlign: TextAlign.center),
@@ -296,13 +467,13 @@ class _MyAppState extends State<MyApp> {
               const Text('Send Files To:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               TextField(
-                controller: _clientTargetIpController, // Renamed for clarity
+                controller: _clientTargetIpController,
                 decoration: const InputDecoration(labelText: 'Target Server IP Address', border: OutlineInputBorder()),
                 keyboardType: TextInputType.url,
               ),
               const SizedBox(height: 12),
               TextField(
-                controller: _clientTargetPortController, // Renamed for clarity
+                controller: _clientTargetPortController,
                 decoration: const InputDecoration(labelText: 'Target Server Port', border: OutlineInputBorder()),
                 keyboardType: TextInputType.number,
               ),

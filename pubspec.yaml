@@ -41,6 +41,7 @@ dependencies:
   shelf: ^1.4.2           # for local HTTP server
   encrypt: ^5.0.3         # optional encryption
   shared_preferences: ^2.5.3
+  network_info_plus: ^6.1.4
 
 dev_dependencies:
   flutter_test:

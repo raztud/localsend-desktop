@@ -10,7 +10,7 @@ class SettingsService {
   // static const int defaultPort = 8080;
   final Random _random = Random();
 
-  int _getRandomPort() {
+  int generateRandomPortInRange() {
     const minPort = 49152;
     const maxPort = 65535;
     return minPort + _random.nextInt(maxPort - minPort + 1);
@@ -27,19 +27,9 @@ class SettingsService {
     await prefs.setString(serverHostKey, host);
   }
 
-  Future<int> getServerPort({bool preferRandom = false}) async {
+  Future<int> getServerPort() async {
     final prefs = await SharedPreferences.getInstance();
-    int? storedPort = prefs.getInt(serverPortKey);
-
-    if (preferRandom || storedPort == null || storedPort == 0) {
-      // If preferRandom is true, or no port is stored, or stored port is 0 (our convention for random)
-      int randomPort = _getRandomPort();
-      // Optionally, you might want to save this randomly chosen port
-      // await prefs.setInt(serverPortKey, randomPort); // Uncomment to save the chosen random port
-      print("ℹ️ Using random port: $randomPort");
-      return randomPort;
-    }
-    return storedPort;
+    return prefs.getInt(serverPortKey) ?? 0; // Default to 0 for random
   }
 
   Future<void> setServerPort(int port) async {
@@ -49,9 +39,7 @@ class SettingsService {
 
   Future<void> setServerPortToRandom() async {
     final prefs = await SharedPreferences.getInstance();
-    // Storing 0 can be a convention to mean "use random on next start"
-    await prefs.setInt(serverPortKey, 0);
-    print("ℹ️ Server port set to pick random on next start.");
+    await prefs.setInt(serverPortKey, 0); // Storing 0 means "use random"
   }
 
 }

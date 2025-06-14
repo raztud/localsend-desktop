@@ -5,81 +5,90 @@ import 'settings_service.dart';
 
 Function(String filename, List<int> fileBytes)? onFileReceivedRequest;
 
-HttpServer? _server;
-bool get isServerRunning => _server != null;
-String? get serverAddress => _server?.address.host;
-int? get serverPort => _server?.port;
+HttpServer? _httpServerInstance;
+bool isServerRunning() => _httpServerInstance != null;
+String? getServerAddress() => _httpServerInstance?.address.host;
+int? getServerPort() => _httpServerInstance?.port;
 
-Future<void> startServer({bool useRandomPortOnThisStart = false}) async {
-  await stopServer(); // Stop existing server if any
+Future<void> startServer({String? host, int? portOverride}) async {
+  await stopServer();
 
-  final settings = SettingsService();
-  final host = await settings.getServerHost();
-  final port = await settings.getServerPort(preferRandom: useRandomPortOnThisStart);
+  final settings = SettingsService(); // Still useful for persisting choices
+  String hostToUse = host ?? await settings.getServerHost();
+  int portToUse;
+
+  if (portOverride != null) {
+    portToUse = portOverride; // Directly use the provided port (0 means random for shelf_io.serve)
+  } else {
+    // Fallback to settings if no override, 0 means random
+    portToUse = await settings.getServerPort();
+  }
+
+  // If port is 0, shelf_io.serve will pick an available one.
+  // If you need to generate random within a specific range *before* calling serve:
+  if (portToUse == 0) { // If port is 0, generate a new random one
+    portToUse = settings.generateRandomPortInRange(); // Use method from SettingsService
+    print("ℹ️ Using newly generated random port for this start: $portToUse");
+  }
+
 
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addHandler(_handleRequest);
 
   try {
-    _server = await shelf_io.serve(handler, host, port);
-    print('✅ Server listening on http://${_server!.address.host}:${_server!.port}');
-    // If a random port was chosen by shelf_io.serve (if you passed port 0),
-    // you might want to save it back.
-    if (_server!.port != port && port == 0) { // If you passed 0 to serve and it picked one
-      print("ℹ️ Server started on dynamically assigned port: ${_server!.port}. You might want to save this.");
-      // await settings.setServerPort(_server!.port); // Optional: save the actual port
-    } else if (_server!.port == port) {
-      // If the port was specified (either from settings or randomly generated before calling serve)
-      // and we want to ensure this chosen port is saved for next time:
-      // await settings.setServerPort(port); // Uncomment if you want to persist a chosen random port
-    }
+    _httpServerInstance = await shelf_io.serve(handler, hostToUse, portToUse);
+    print('✅ Server listening on http://${_httpServerInstance!.address.host}:${_httpServerInstance!.port}');
+
+    // Persist the actual host and port used if they were dynamically determined or different
+    await settings.setServerHost(_httpServerInstance!.address.host); // Could be different if '0.0.0.0' was used
+    await settings.setServerPort(_httpServerInstance!.port);
 
   } catch (e) {
-    print('❌ Error starting server on $host:$port: $e');
-    if (e is SocketException && e.osError?.errorCode == 48 /* EADDRINUSE */) {
-      print("⚠️ Port $port is already in use. Trying a different random port...");
-      await Future.delayed(Duration(milliseconds: 100)); // Small delay
-      await startServer(useRandomPortOnThisStart: true); // Force random on retry
+    _httpServerInstance = null; // Ensure it's null on failure
+    print('❌ Error starting server on $hostToUse:$portToUse: $e');
+    if (e is SocketException && portToUse != 0 /*&& e.osError?.errorCode == 48*/) { // Port in use
+      print("⚠️ Port $portToUse is already in use. Trying a different random port...");
+      await Future.delayed(const Duration(milliseconds: 100));
+      // Force a new random port by passing 0 as override
+      await startServer(host: hostToUse, portOverride: 0);
     }
   }
 }
 
 Future<void> stopServer() async {
-  if (_server != null) {
-    await _server!.close(force: true);
-    _server = null;
+  if (_httpServerInstance != null) {
+    await _httpServerInstance!.close(force: true);
+    _httpServerInstance = null;
     print('ℹ️ Server stopped.');
   }
 }
 
-Future<void> restartServer({bool useRandomPort = false}) async {
+Future<void> restartServer({String? hostOverride, int? portOverride}) async {
   print('🔄 Restarting server...');
-  await startServer(useRandomPortOnThisStart: useRandomPort);
+  await startServer(host: hostOverride, portOverride: portOverride);
 }
-
 
 Future<Response> _handleRequest(Request request) async {
   if (request.method == 'POST' && request.url.path == 'upload') {
     final filename = request.headers['x-filename'];
-    if (filename == null) {
-      return Response.badRequest(body: 'Missing "x-filename" header');
+    if (filename == null || filename.isEmpty) {
+      return Response.badRequest(body: 'Missing or empty "x-filename" header');
     }
 
-    final bytes = await request.read().expand((i) => i).toList();
+    final List<int> bytes = await request.read().expand((chunk) => chunk).toList();
 
-    // Ask UI for permission
+    if (bytes.isEmpty) {
+      return Response.badRequest(body: 'Received empty file content');
+    }
     if (onFileReceivedRequest != null) {
-      // Don't await this, let the UI handle it independently
       Future.microtask(() => onFileReceivedRequest!(filename, bytes));
       return Response.ok('File received by server, awaiting user confirmation in UI.');
     } else {
-      // This case should ideally not happen if main.dart sets the callback
       print('⚠️ onFileReceivedRequest callback is not set. File cannot be processed by UI.');
       return Response.internalServerError(body: 'File received, but UI callback not configured.');
     }
-
   }
-
-  return Response.notFound('Not Found');
+  return Response.notFound('Not Found. Use POST to /upload with x-filename header.');
 }
+
