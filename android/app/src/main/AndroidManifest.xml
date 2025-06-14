@@ -1,8 +1,21 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- For network_info_plus to get Wi-Fi IP and other details -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- If you plan to save files to external storage (though getApplicationDocumentsDirectory is internal)
+         or if file_picker needs broader access depending on what user picks.
+         For Android 10+ Scoped Storage might change how these are strictly needed.
+         getApplicationDocumentsDirectory typically doesn't need explicit storage permissions. -->
+    <!-- <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" /> -->
+    <!-- <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" /> -->
+
     <application
         android:label="wifisend"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">  <!-- TODO use SSL -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
