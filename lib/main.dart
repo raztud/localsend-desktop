@@ -6,7 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 
 import 'server.dart';
-import 'settings_service.dart'; // Import
+import 'settings_service.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -29,11 +29,11 @@ class _MyAppState extends State<MyApp> {
   final TextEditingController _clientTargetIpController = TextEditingController(text: '192.168.1.100');
   final TextEditingController _clientTargetPortController = TextEditingController(text: '8080');
 
-  // For server settings UI
   final SettingsService _settingsService = SettingsService();
   late TextEditingController _serverListenIpController;
   late TextEditingController _serverListenPortController;
   String _currentServerStatus = "Loading server settings...";
+  bool _useRandomPortForServer = false;
 
   @override
   void initState() {
@@ -75,37 +75,66 @@ class _MyAppState extends State<MyApp> {
     if (mounted) {
       setState(() {
         _serverListenIpController.text = host;
-        _serverListenPortController.text = port.toString();
-        // You might need a more robust way to check actual server status
-        // For now, we assume if startServer didn't throw, it's okay.
-        _currentServerStatus = "Server attempting to listen on $host:$port (Check console for errors)";
+        if (port == 0) {
+          _serverListenPortController.text = ""; // Clear it or set placeholder
+          _useRandomPortForServer = true; // Check the box
+        } else {
+          _serverListenPortController.text = port.toString();
+          _useRandomPortForServer = false;
+        }
+        _updateServerStatusMessage();
       });
+    }
+  }
+
+
+  void _updateServerStatusMessage() {
+    // This needs to be more robust. The actual listening port is in _server.port after server starts.
+    // This is just a predictive message.
+    if (!isServerRunning) {
+      _currentServerStatus = "Server is stopped.";
+    } else {
+      _currentServerStatus = "Server listening on http://$serverAddress:$serverPort";
     }
   }
 
   Future<void> _saveServerSettingsAndRestart() async {
     final String newHost = _serverListenIpController.text.trim();
-    final int? newPort = int.tryParse(_serverListenPortController.text.trim());
+    int? newPort;
 
-    if (newPort == null || newPort <= 0 || newPort > 65535) {
-      _showSnackBar("Invalid port number. Must be between 1 and 65535.");
-      return;
+    if (_useRandomPortForServer) {
+      await _settingsService.setServerPortToRandom(); // Signal to use random on next generic start
+      newPort = 0; // Convention for "pick random"
+      print("ℹ️ Server will use a random port on next start.");
+    } else {
+      newPort = int.tryParse(_serverListenPortController.text.trim());
+      if (newPort == null || newPort <= 0 || newPort > 65535) {
+        _showSnackBar("Invalid port number. Must be between 1 and 65535.");
+        return;
+      }
+      await _settingsService.setServerPort(newPort);
     }
+
     if (newHost.isEmpty) {
       _showSnackBar("Server IP/Host cannot be empty. Use '0.0.0.0' to listen on all interfaces.");
       return;
     }
-
     await _settingsService.setServerHost(newHost);
-    await _settingsService.setServerPort(newPort);
-    if(mounted) {
+
+    if (mounted) {
       setState(() {
         _currentServerStatus = "Restarting server with new settings...";
       });
     }
-    await restartServer(); // Call restart from server.dart
-    await _loadServerSettingsAndStatus(); // Refresh displayed status
-    _showSnackBar("Server settings saved and server restarted.");
+    // Pass the explicit desire for random if the checkbox is checked for *this specific restart*
+    await restartServer(useRandomPort: _useRandomPortForServer);
+    // After server starts, _server.port will have the actual port
+    if (mounted) {
+      setState(() {
+        _loadServerSettingsAndStatus(); // Reload and update UI to show actual port
+      });
+    }
+    _showSnackBar("Server settings saved and server (re)started.");
   }
 
   Future<bool> _showConfirmationDialog(BuildContext dialogContext, String filename) async {
