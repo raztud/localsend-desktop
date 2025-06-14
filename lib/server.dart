@@ -2,15 +2,43 @@ import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 
+import 'settings_service.dart';
+
 Function(String filename, List<int> fileBytes)? onFileReceivedRequest;
 
+HttpServer? _server;
+
 Future<void> startServer() async {
+  await stopServer(); // Stop existing server if any
+
+  final settings = SettingsService();
+  final host = await settings.getServerHost();
+  final port = await settings.getServerPort();
+
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addHandler(_handleRequest);
 
-  final server = await shelf_io.serve(handler, '0.0.0.0', 8080);
-  print('✅ Server listening on http://${server.address.host}:${server.port}');
+  try {
+    _server = await shelf_io.serve(handler, host, port);
+    print('✅ Server listening on http://${_server!.address.host}:$port');
+  } catch (e) {
+    print('❌ Error starting server on $host:$port: $e');
+    // Optionally, reset to defaults or notify user
+  }
+}
+
+Future<void> stopServer() async {
+  if (_server != null) {
+    await _server!.close(force: true);
+    _server = null;
+    print('ℹ️ Server stopped.');
+  }
+}
+
+Future<void> restartServer() async {
+  print('🔄 Restarting server with new settings...');
+  await startServer();
 }
 
 
